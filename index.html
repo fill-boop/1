@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Video Studio</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="top">
+    <h1>Video Studio</h1>
+    <p class="sub">Text or image to video with free open models. Runs on Hugging Face's free GPUs, using your own free daily allowance.</p>
+  </header>
+
+  <main class="grid">
+    <section class="panel" aria-label="Create">
+      <div class="tabs" id="taskTabs" role="tablist">
+        <button data-task="t2v" aria-selected="true">Text to video</button>
+        <button data-task="i2v" aria-selected="false">Image to video</button>
+        <button data-task="v2v" aria-selected="false">Video to video</button>
+      </div>
+
+      <label class="field">
+        <span class="field-label">Model</span>
+        <select id="model"></select>
+        <small id="modelInfo" class="note"></small>
+      </label>
+
+      <div id="mainFields"></div>
+
+      <details id="advanced">
+        <summary>Advanced options</summary>
+        <div id="advFields" class="adv"></div>
+      </details>
+
+      <label class="field check">
+        <input type="checkbox" id="allowSwitch" checked />
+        <span class="field-label">If this model is down, switch to another one automatically</span>
+      </label>
+
+      <div class="actions">
+        <button id="generate" class="primary">Generate</button>
+        <button id="cancel" class="ghost" hidden>Cancel</button>
+      </div>
+    </section>
+
+    <section class="panel" aria-label="Result">
+      <div id="status" class="status" hidden>
+        <div class="status-head"><strong id="statusTitle"></strong><span id="elapsed"></span></div>
+        <p id="statusText" class="note"></p>
+        <div class="track"><div id="bar" class="bar"></div></div>
+      </div>
+
+      <div id="error" class="error" hidden></div>
+
+      <div id="result" hidden>
+        <video id="video" controls autoplay loop playsinline></video>
+        <p id="resultMeta" class="note"></p>
+        <a id="download" href="#" class="primary as-button">Download video</a>
+        <p class="note">Result links on the model's server expire, so download anything you want to keep.</p>
+      </div>
+
+      <div class="empty" id="empty">
+        <p>Your video will appear here.</p>
+      </div>
+
+      <details class="logbox">
+        <summary>Activity</summary>
+        <ul id="log"></ul>
+      </details>
+    </section>
+  </main>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
