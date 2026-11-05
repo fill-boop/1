@@ -8,8 +8,15 @@
 </head>
 <body>
   <header class="top">
-    <h1>Video Studio</h1>
+    <div class="top-row">
+      <h1>Video Studio</h1>
+      <div id="account" class="account" hidden>
+        <button id="signIn" class="hf-btn" hidden>Sign in with Hugging Face</button>
+        <span id="user" class="user" hidden><img id="userAvatar" alt="" /><span id="userName"></span><button id="signOut" class="link">Sign out</button></span>
+      </div>
+    </div>
     <p class="sub">Text or image to video with free open models. Runs on Hugging Face's free GPUs, using your own free daily allowance.</p>
+    <p id="tierNote" class="tier" hidden></p>
   </header>
 
   <main class="grid">

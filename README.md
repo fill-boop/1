@@ -29,6 +29,18 @@ Then open http://localhost:8080. Any static host works (no server code).
 - Page reload mid-job: the inputs, including files, are saved in the browser and the job restarts automatically. Gradio cancels a job when its page goes away, so it can't be rejoined.
 - Daily quota used up: stops and explains. Switching models doesn't help, because the quota is shared across all ZeroGPU Spaces.
 
+## Sign in with Hugging Face
+
+Signed-in visitors use their own Hugging Face quota: 5 min/day free, 40 min/day for PRO, with better queue priority.
+
+1. Create an OAuth app in your Hugging Face settings, **without a client secret** (a public app).
+   - Redirect URIs: `https://video-studio-ecru.vercel.app/` and `http://localhost/` (any local port is allowed).
+   - Scopes: `openid`, `profile`.
+2. Put its Client ID in `js/config.js` (`HF_CLIENT_ID`). It's public, not a secret.
+3. Commit and push. The button appears once the ID is set.
+
+The token stays in the visitor's browser and is only sent to huggingface.co and the `.hf.space` Spaces.
+
 ## Known limits
 
 - Anonymous visitors have the lowest queue priority. In testing (Nov 2026), every anonymous attempt got "No GPU was available after 60s", and 2 minutes of free time were used up without producing a video.

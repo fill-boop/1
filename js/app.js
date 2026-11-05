@@ -1,8 +1,9 @@
 import { MODELS, MODEL_FALLBACK_ORDER } from "./models.js";
 import {
   GenError, loadSpace, getEndpoint, uploadFile, newSessionHash,
-  joinQueue, readStream, findVideoUrl, spaceStatus,
+  joinQueue, readStream, findVideoUrl, spaceStatus, setAuthToken,
 } from "./gradio.js";
+import { authEnabled, login, logout, handleRedirect, currentUser } from "./auth.js";
 
 const $ = (s) => document.querySelector(s);
 const els = {
@@ -581,13 +582,15 @@ async function generate(restored = null) {
       showError(
         "You've used today's free GPU time.",
         `Hugging Face gives each visitor a small free daily GPU allowance, shared across all these models, so switching models won't help. ` +
-        `It resets 24 hours after your first use today. Details from the Space: ${e.message}`
+        `It resets 24 hours after your first use today. Details from the Space: ${e.message}` +
+        (authEnabled() && !currentUser() ? SIGN_IN_HINT : "")
       );
     else if (e.kind === "nogpu")
       showError(
         "Hugging Face had no free GPU for you within 60 seconds.",
         "Visitors who aren't signed in to Hugging Face get the lowest priority. This wait still counted against today's free GPU time, " +
-        "so the page didn't retry automatically. Try again in a few minutes, or use a shorter video."
+        "so the page didn't retry automatically. Try again in a few minutes, or use a shorter video." +
+        (authEnabled() && !currentUser() ? SIGN_IN_HINT : "")
       );
     else showError("Couldn't generate the video.", `${e.message}${e.detail ? " – " + e.detail : ""}`);
   } finally {
@@ -654,6 +657,37 @@ els.model.addEventListener("change", () => selectModel(els.model.value));
 els.generate.addEventListener("click", () => generate());
 els.cancel.addEventListener("click", () => state.ctrl?.abort());
 
-renderModels();
-checkHealth();
-resumeJob();
+// ---------- account ----------
+const SIGN_IN_HINT = " Signing in with a free Hugging Face account gives you 5 minutes a day (instead of 2) and a better place in the queue.";
+
+function renderAccount() {
+  const user = authEnabled() ? currentUser() : null;
+  setAuthToken(user?.token);
+  $("#account").hidden = !authEnabled();
+  $("#signIn").hidden = !!user;
+  $("#user").hidden = !user;
+  const note = $("#tierNote");
+  if (user) {
+    $("#userName").textContent = user.name;
+    if (user.avatar) $("#userAvatar").src = user.avatar; else $("#userAvatar").removeAttribute("src");
+    note.textContent = user.isPro
+      ? "Signed in with PRO: about 40 minutes of GPU time a day, top queue priority."
+      : "Signed in: about 5 minutes of GPU time a day and a better queue position. Uses your own Hugging Face quota.";
+  } else {
+    note.textContent = "Not signed in: about 2 minutes of GPU time a day and the lowest queue priority." + (authEnabled() ? " Sign in for more." : "");
+  }
+  note.hidden = false;
+}
+
+$("#signIn").addEventListener("click", () => login());
+$("#signOut").addEventListener("click", () => { logout(); renderAccount(); });
+
+async function start() {
+  const authError = authEnabled() ? await handleRedirect() : null;
+  renderAccount();
+  if (authError) showError(authError);
+  renderModels();
+  checkHealth();
+  resumeJob();
+}
+start();

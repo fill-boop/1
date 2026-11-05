@@ -4,6 +4,12 @@
 
 const HF_API = "https://huggingface.co/api/spaces";
 
+// Signed-in visitor's Hugging Face token. When set, Spaces count GPU time
+// against that visitor's account (more quota, better queue priority).
+let authToken = null;
+export function setAuthToken(token) { authToken = token || null; }
+const auth = () => (authToken ? { Authorization: `Bearer ${authToken}` } : {});
+
 export class GenError extends Error {
   // kind: "quota" | "busy" | "down" | "input" | "lost" | "cancelled" | "unknown"
   constructor(kind, message, detail = "") {
@@ -81,7 +87,7 @@ export async function uploadFile(space, file, signal) {
   form.append("files", file);
   let r;
   try {
-    r = await fetchWithTimeout(`${space.url}${space.prefix}/upload`, { method: "POST", body: form, signal }, 120000);
+    r = await fetchWithTimeout(`${space.url}${space.prefix}/upload`, { method: "POST", body: form, headers: auth(), signal }, 120000);
   } catch (e) {
     if (signal?.aborted) throw new GenError("cancelled", "Cancelled.");
     throw new GenError("down", "Upload failed: could not reach the Space.");
@@ -111,7 +117,7 @@ export async function joinQueue(space, ep, data, sessionHash, signal) {
       `${space.url}${space.prefix}/queue/join`,
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...auth() },
         body: JSON.stringify({
           data,
           event_data: null,
@@ -144,7 +150,7 @@ export async function readStream(space, sessionHash, eventId, signal, onMessage)
   let r;
   try {
     r = await fetch(`${space.url}${space.prefix}/queue/data?session_hash=${encodeURIComponent(sessionHash)}`, {
-      headers: { Accept: "text/event-stream" },
+      headers: { Accept: "text/event-stream", ...auth() },
       cache: "no-store",
       signal,
     });
