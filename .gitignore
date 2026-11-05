@@ -1,0 +1,8 @@
+# local tool settings, not part of the site
+.claude/
+.vercel/
+
+# OS clutter
+Thumbs.db
+desktop.ini
+.DS_Store
