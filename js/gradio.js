@@ -164,6 +164,7 @@ export async function readStream(space, sessionHash, eventId, signal, onMessage)
   const reader = r.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let lastData = null; // streaming Spaces send partial results as process_generating
   try {
     while (true) {
       const { value, done } = await reader.read();
@@ -178,13 +179,17 @@ export async function readStream(space, sessionHash, eventId, signal, onMessage)
         try { msg = JSON.parse(line); } catch { continue; }
         if (msg.event_id && eventId && msg.event_id !== eventId) continue;
         onMessage?.(msg);
+        if (msg.msg === "process_generating" && Array.isArray(msg.output?.data) && msg.output.data.some(Boolean)) {
+          lastData = msg.output.data;
+        }
         if (msg.msg === "process_completed") {
           if (msg.success === false || msg.output?.error) {
             const errText = msg.output?.error || msg.title || "The model failed.";
             const kind = classifyError(errText);
             throw new GenError(kind === "unknown" ? "busy" : kind, errText);
           }
-          return msg.output?.data || [];
+          const data = msg.output?.data || [];
+          return data.some(Boolean) ? data : lastData || data;
         }
         if (msg.msg === "queue_full") throw new GenError("busy", "The Space queue is full.");
         if (msg.msg === "unexpected_error") throw new GenError(classifyError(msg.message) || "down", msg.message || "Unexpected error.");
@@ -204,6 +209,7 @@ export function findVideoUrl(space, outputs) {
   const toUrl = (v) => {
     if (!v) return null;
     if (typeof v === "string") {
+      if (/[<\s]/.test(v)) return null; // html or text output, not a file
       if (/^https?:/.test(v)) return v;
       return `${space.url}${space.prefix}/file=${v}`;
     }

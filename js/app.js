@@ -1,4 +1,4 @@
-import { MODELS, MODEL_FALLBACK_ORDER } from "./models.js";
+import { MODELS, MODEL_FALLBACK_ORDER, TASKS } from "./models.js";
 import {
   GenError, loadSpace, getEndpoint, uploadFile, newSessionHash,
   joinQueue, readStream, findVideoUrl, spaceStatus, setAuthToken,
@@ -97,12 +97,16 @@ async function getSpace(spaceId) {
 }
 
 // What an input "means", so values can move between Spaces with different layouts.
-function rolesFor(inputs) {
+const FILE_TYPES = ["image", "imageeditor", "gallery", "video", "audio", "file"];
+
+function rolesFor(inputs, model) {
   let images = 0;
   return inputs.map((inp) => {
+    if (model?.roles?.[inp.id]) return model.roles[inp.id];
     const label = String(inp.props.label || "");
     const fileTypes = (inp.props.file_types || []).join(",");
-    if (inp.type === "image") return ++images === 1 ? "image1" : "image2";
+    if (inp.type === "image" || inp.type === "imageeditor") return ++images === 1 ? "image1" : "image2";
+    if (inp.type === "gallery") return "gallery";
     if (inp.type === "video") return "video";
     if (inp.type === "audio" || (inp.type === "file" && /audio/.test(fileTypes))) return "audio";
     if (inp.type === "textbox" && /negative/i.test(label)) return "negative";
@@ -189,25 +193,32 @@ function control(inp, role, model) {
   wrap.append(title);
   let read;
 
-  if (["image", "video", "audio", "file"].includes(type)) {
+  if (FILE_TYPES.includes(type)) {
+    const kind = ["image", "imageeditor", "gallery"].includes(type) ? "image" : type === "video" ? "video" : "audio";
     const input = document.createElement("input");
     input.type = "file";
-    input.accept = type === "image" ? "image/*" : type === "video" ? "video/*" : "audio/*";
+    input.accept = `${kind}/*`;
+    input.multiple = type === "gallery";
     const preview = document.createElement("div");
     preview.className = "preview";
     input.addEventListener("change", () => {
       preview.replaceChildren();
-      const f = input.files[0];
-      if (!f) return;
-      const url = URL.createObjectURL(f);
-      const el = document.createElement(type === "image" ? "img" : type === "video" ? "video" : "audio");
-      el.src = url;
-      if (type !== "image") el.controls = true;
-      preview.append(el);
+      for (const f of input.files) {
+        const el = document.createElement(kind === "image" ? "img" : kind);
+        el.src = URL.createObjectURL(f);
+        if (kind !== "image") el.controls = true;
+        preview.append(el);
+      }
     });
     wrap.classList.add("file");
+    if (kind === "audio") {
+      const hint = document.createElement("small");
+      hint.className = "note";
+      hint.textContent = "Upload an audio file (mp3, wav, m4a…). No microphone needed.";
+      wrap.append(hint);
+    }
     wrap.append(input, preview);
-    read = () => input.files[0] || null;
+    read = type === "gallery" ? () => (input.files.length ? [...input.files] : null) : () => input.files[0] || null;
   } else if (type === "textbox" && role === "negative" && /[一-鿿]/.test(p.value || "")) {
     title.textContent = "Avoid in the video";
     wrap.classList.add("neg");
@@ -268,8 +279,8 @@ function control(inp, role, model) {
 function shouldShow(inp, role, task, hide) {
   if (hide.has(inp.props.label)) return false;
   if (/^(image|video)_[a-z]$/.test(inp.props.label || "")) return false;
-  if (task === "t2v" && (role.startsWith("image") || role === "video")) return false;
-  if (task === "i2v" && role === "video") return false;
+  if (task === "t2v" && (role.startsWith("image") || role === "video" || role === "gallery")) return false;
+  if ((task === "i2v" || task === "avatar") && role === "video") return false;
   return true;
 }
 
@@ -284,7 +295,7 @@ async function buildForm() {
     const ep = getEndpoint(space, endpointName(model, state.task));
     state.space = space;
     state.endpoint = ep;
-    const roles = rolesFor(ep.inputs);
+    const roles = rolesFor(ep.inputs, model);
     const { hide } = overridesFor(model, state.task);
     els.mainFields.replaceChildren();
     state.fields = [];
@@ -295,7 +306,7 @@ async function buildForm() {
       const c = control(inp, role, model);
       if (!c) return;
       state.fields.push({ input: inp, role, read: c.read });
-      const main = ["image1", "image2", "video", "audio", "prompt"].includes(role);
+      const main = ["image1", "image2", "gallery", "video", "audio", "prompt"].includes(role);
       (main ? els.mainFields : els.advFields).append(c.el);
     });
     els.advanced.hidden = !els.advFields.children.length;
@@ -314,11 +325,61 @@ function spinnerNote(text, isError) {
   return p;
 }
 
+// ---------- daily quota per visitor ----------
+// The quota is one pool for all ZeroGPU Spaces, but each model reserves a
+// different amount of GPU time per video. Spaces refuse a job when its
+// reservation is bigger than what's left, e.g. "(112s requested vs. 83s left).
+// Try again in 23:46:06". We remember that, so models that can't fit are
+// disabled until the quota resets.
+const QUOTA_KEY = "vgen.quota";
+const quotaOwner = () => currentUser()?.name || "anonymous";
+
+function getQuota() {
+  const q = load(QUOTA_KEY);
+  if (!q || q.who !== quotaOwner() || Date.now() > q.resetAt) return null;
+  return q;
+}
+
+function recordQuota(spaceId, message) {
+  const q = getQuota() || { who: quotaOwner(), left: null, resetAt: Date.now() + 24 * 3600e3, needs: {}, runsLimitUntil: 0 };
+  const m = /\((\d+)s requested vs\.? (\d+)s left\)/.exec(message);
+  const t = /try again in (\d+):(\d+):(\d+)/i.exec(message);
+  if (m) { q.needs[spaceId] = Number(m[1]); q.left = Number(m[2]); }
+  if (t) q.resetAt = Date.now() + (Number(t[1]) * 3600 + Number(t[2]) * 60 + Number(t[3])) * 1000;
+  if (/runs limit/i.test(message)) q.runsLimitUntil = Date.now() + 3600e3; // no reset time given: look again in an hour
+  else if (!m) q.left = 0;
+  store(QUOTA_KEY, q);
+}
+
+function fmtUntil(ts) {
+  const min = Math.max(1, Math.round((ts - Date.now()) / 60000));
+  return min < 60 ? `${min}m` : `${Math.floor(min / 60)}h ${min % 60}m`;
+}
+
+// Why this model can't run today, or null.
+function blockedReason(model) {
+  const q = getQuota();
+  if (!q) return null;
+  if (q.runsLimitUntil > Date.now()) return `run limit reached, try again in ${fmtUntil(q.runsLimitUntil)}`;
+  if (q.left !== null && q.left < 20) return `no free time left, resets in ${fmtUntil(q.resetAt)}`;
+  const needs = [model.id, ...(model.backups || [])].map((id) => q.needs[id]).filter(Boolean);
+  if (needs.length && q.left !== null && Math.min(...needs) > q.left)
+    return `needs ${Math.min(...needs)}s, ${q.left}s left today, resets in ${fmtUntil(q.resetAt)}`;
+  return null;
+}
+
+function optionLabel(m) {
+  const h = state.health.get(m.id);
+  const b = blockedReason(m);
+  return `${m.name}${h && h !== "RUNNING" ? ` (${h.toLowerCase()})` : ""}${b ? ` (${b})` : ""}`;
+}
+
 function showHealth(model) {
   const h = state.health.get(model.id);
   const hw = model.gpuSize === "xlarge" ? " · Big GPU: uses your daily free time 2× faster" : "";
   const status = h ? (h === "RUNNING" ? "Online" : h) : "Checking…";
-  els.modelInfo.textContent = `${model.id} · ${status}${hw}`;
+  const b = blockedReason(model);
+  els.modelInfo.textContent = `${model.id} · ${status}${hw}${b ? ` · Not available today: ${b}` : ""}`;
 }
 
 function renderModels() {
@@ -328,13 +389,35 @@ function renderModels() {
     if (!m.tasks.includes(state.task)) continue;
     const o = document.createElement("option");
     o.value = m.key;
-    const h = state.health.get(m.id);
-    o.textContent = `${m.name}${h && h !== "RUNNING" ? ` (${h.toLowerCase()})` : ""}`;
+    o.textContent = optionLabel(m);
+    o.disabled = !!blockedReason(m);
     els.model.append(o);
   }
-  const keep = [...els.model.options].find((o) => o.value === prev);
-  els.model.value = keep ? prev : els.model.options[0]?.value;
+  const opts = [...els.model.options];
+  const pick = opts.find((o) => o.value === prev && !o.disabled) || opts.find((o) => !o.disabled) || opts[0];
+  els.model.value = pick?.value;
   selectModel(els.model.value);
+}
+
+// Update labels and disabled state in place (keeps the form and anything typed),
+// and move off the selected model if it can no longer run today.
+function refreshModelOptions() {
+  for (const o of els.model.options) {
+    const m = MODELS.find((x) => x.key === o.value);
+    o.textContent = optionLabel(m);
+    o.disabled = !!blockedReason(m);
+  }
+  const cur = els.model.selectedOptions[0];
+  if (cur?.disabled && !state.ctrl) {
+    const next = [...els.model.options].find((o) => !o.disabled);
+    if (next) {
+      log(`${state.model.name} doesn't fit in today's free GPU time – switched to ${MODELS.find((x) => x.key === next.value).name}.`);
+      els.model.value = next.value;
+      selectModel(next.value);
+      return;
+    }
+  }
+  if (state.model) showHealth(state.model);
 }
 
 function selectModel(key) {
@@ -350,8 +433,12 @@ function collectValues() {
 }
 
 function validate(values) {
-  if (state.task === "i2v" && !values.image1) return "Please add an input image.";
-  if (state.task === "v2v" && !values.video) return "Please add an input video.";
+  const has = (r) => state.fields.some((f) => f.role === r);
+  const t = state.task;
+  if (t === "i2v" && has("gallery") && !values.gallery) return "Please add at least one reference image.";
+  if ((t === "i2v" || t === "avatar" || t === "animate") && has("image1") && !values.image1) return "Please add an input image.";
+  if ((t === "v2v" || t === "animate" || t === "sound") && has("video") && !values.video) return "Please add an input video.";
+  if (t === "avatar" && has("audio") && !values.audio) return "Please add an audio file.";
   if (!values.prompt && state.fields.some((f) => f.role === "prompt")) return "Please write a prompt.";
   return null;
 }
@@ -365,7 +452,7 @@ function clamp(v, p) {
 
 // Build the data array for a given Space, mapping values by role.
 async function buildData(model, space, ep, values, signal) {
-  const roles = rolesFor(ep.inputs);
+  const roles = rolesFor(ep.inputs, model);
   const { fixed } = overridesFor(model, state.task);
   const uploads = [];
   const data = ep.inputs.map((inp, i) => {
@@ -376,10 +463,11 @@ async function buildData(model, space, ep, values, signal) {
     let v = values[role];
     if (sf) return v ?? sf.value;
     if (v === undefined || v === null) {
-      if (["image", "video", "audio", "file"].includes(inp.type)) return null;
+      if (inp.type === "gallery") return [];
+      if (FILE_TYPES.includes(inp.type)) return null;
       return inp.props.value ?? null;
     }
-    if (v instanceof File) {
+    if (v instanceof File || (Array.isArray(v) && v[0] instanceof File)) {
       uploads.push([i, v]);
       return null;
     }
@@ -387,11 +475,19 @@ async function buildData(model, space, ep, values, signal) {
     if ((role === "height" || role === "width") && inp.props.step > 1) v = Math.round(v / inp.props.step) * inp.props.step;
     return v;
   });
-  for (const [i, file] of uploads) {
-    setStatus("Uploading", `Sending ${file.name} to ${space.spaceId}…`, 5);
-    let fd = await uploadFile(space, file, signal);
-    if (ep.inputs[i].type === "video") fd = { video: fd, subtitles: null };
-    data[i] = fd;
+  for (const [i, value] of uploads) {
+    const type = ep.inputs[i].type;
+    const files = Array.isArray(value) ? value : [value];
+    const fds = [];
+    for (const file of files) {
+      setStatus("Uploading", `Sending ${file.name} to ${space.spaceId}…`, 5);
+      fds.push(await uploadFile(space, file, signal));
+    }
+    const fd = fds[0];
+    if (type === "gallery") data[i] = fds.map((f) => ({ image: f, caption: null }));
+    else if (type === "imageeditor") data[i] = { background: fd, layers: [], composite: fd, id: null };
+    else if (type === "video") data[i] = { video: fd, subtitles: null };
+    else data[i] = fd;
   }
   return data;
 }
@@ -523,6 +619,7 @@ async function generate(restored = null) {
   state.quotaLeft = 0;
   const plan = attemptPlan(state.model, els.allowSwitch.checked);
   let lastErr = null;
+  let skippedForQuota = null;
 
   try {
     for (const step of plan) {
@@ -531,6 +628,8 @@ async function generate(restored = null) {
       }
       const h = state.health.get(step.spaceId);
       if (h && h !== "RUNNING") { log(`Skipping ${step.spaceId}: ${h}`); continue; }
+      const blocked = blockedReason(step.model);
+      if (blocked) { skippedForQuota = blocked; log(`Skipping ${step.model.name}: ${blocked}`); continue; }
       for (let retry = 0; retry < 2; retry++) {
         try {
           log(`Trying ${step.spaceId}${retry ? " (retry)" : ""}`);
@@ -547,6 +646,7 @@ async function generate(restored = null) {
           log(`${step.spaceId}: ${e.kind || "error"} – ${e.message}`);
           if (!(e instanceof GenError) || e.kind === "cancelled" || e.kind === "nogpu") throw e; // bugs shouldn't trigger model switching
           if (e.kind === "quota") {
+            recordQuota(step.spaceId, e.message);
             // Quota is shared by every ZeroGPU Space. But the check is "reserved vs left",
             // so a lighter model may still fit in what's left.
             const m = /\((\d+)s requested vs\.? (\d+)s left\)/.exec(e.message);
@@ -574,6 +674,7 @@ async function generate(restored = null) {
       state.quotaLeft = 0;
       throw new GenError("quota", `Only ${left}s of free GPU time is left today, which isn't enough for any available model. Try a shorter video or smaller size.`);
     }
+    if (!lastErr && skippedForQuota) throw new GenError("quota", `No model fits in what's left today (${skippedForQuota}).`);
     throw lastErr || new GenError("down", "No model was available.");
   } catch (e) {
     els.status.hidden = true;
@@ -598,6 +699,7 @@ async function generate(restored = null) {
     stopTimer();
     setBusy(false);
     state.ctrl = null;
+    refreshModelOptions();
   }
 }
 
@@ -636,13 +738,7 @@ async function checkHealth() {
   }));
   const down = [...state.health].filter(([, s]) => s !== "RUNNING").map(([id, s]) => `${id} (${s})`);
   if (down.length) log(`Unavailable right now: ${down.join(", ")}`);
-  // update labels in place so the form (and anything typed) is kept
-  for (const o of els.model.options) {
-    const m = MODELS.find((x) => x.key === o.value);
-    const h = state.health.get(m.id);
-    o.textContent = `${m.name}${h && h !== "RUNNING" ? ` (${h.toLowerCase()})` : ""}`;
-  }
-  if (state.model) showHealth(state.model);
+  refreshModelOptions();
 }
 
 // ---------- wire up ----------
@@ -680,9 +776,20 @@ function renderAccount() {
 }
 
 $("#signIn").addEventListener("click", () => login());
-$("#signOut").addEventListener("click", () => { logout(); renderAccount(); });
+$("#signOut").addEventListener("click", () => { logout(); renderAccount(); refreshModelOptions(); });
+
+function renderTabs() {
+  els.taskTabs.replaceChildren(...TASKS.map((t) => {
+    const b = document.createElement("button");
+    b.dataset.task = t.key;
+    b.textContent = t.label;
+    b.setAttribute("aria-selected", String(t.key === state.task));
+    return b;
+  }));
+}
 
 async function start() {
+  renderTabs();
   const authError = authEnabled() ? await handleRedirect() : null;
   renderAccount();
   if (authError) showError(authError);
